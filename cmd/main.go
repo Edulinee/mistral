@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	projectAI "github.com/Jamolkhon5/mistral/internal/ai/project/handler"
 	"github.com/Jamolkhon5/mistral/internal/auth"
 	"github.com/Jamolkhon5/mistral/internal/config"
 	"github.com/Jamolkhon5/mistral/internal/handler"
@@ -25,13 +26,14 @@ import (
 )
 
 func main() {
+	// Настройка логирования
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Println("Starting Mistral Chat service...")
+	log.Println("Запуск сервиса Mistral Chat...")
 
-	// Загрузка конфигурации
+	// Загрузка основной конфигурации
 	cfg, err := config.NewConfig(".env")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Ошибка загрузки конфигурации:", err)
 	}
 
 	// Подключение к базе данных
@@ -41,130 +43,185 @@ func main() {
 	// Ожидание готовности базы данных
 	db, err := waitForDatabase(dbURL)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Ошибка подключения к базе данных:", err)
 	}
 	defer db.Close()
 
-	// Создание таблицы
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS messages (
-			id SERIAL PRIMARY KEY,
-			user_id VARCHAR(255) NOT NULL,
-			message TEXT NOT NULL,
-			role VARCHAR(50) NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		log.Fatal(err)
+	// Инициализация таблиц
+	if err := initializeTables(db); err != nil {
+		log.Fatal("Ошибка инициализации таблиц:", err)
 	}
-	log.Println("Database initialized successfully")
+	log.Println("База данных успешно инициализирована")
 
-	// Подключение к сервису auth
-	authConfig, err := auth.NewConfig(".auth.env")
+	// Подключение к сервису аутентификации
+	authConn, err := initializeAuthService()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Ошибка подключения к сервису аутентификации:", err)
 	}
+	defer authConn.Close()
+	log.Println("Подключено к сервису аутентификации")
 
-	conn, err := grpc.Dial(authConfig.AuthAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
-	log.Println("Connected to auth service")
-
-	auth.InitClient(conn)
-
-	// Инициализация репозитория и хендлера
+	// Инициализация репозитория и обработчиков
 	repo := repository.NewRepository(db)
-	handler := handler.NewHandler(repo, cfg.MistralApiKey, cfg.ModelName)
+	chatHandler := handler.NewHandler(repo, cfg.MistralApiKey, cfg.ModelName)
+	projectAssistant := projectAI.NewProjectAssistantHandler(cfg.MistralApiKey, cfg.ModelName)
 
 	// Настройка роутера
-	r := chi.NewRouter()
+	router := setupRouter()
 
-	// CORS middleware
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000"}, // Добавьте другие разрешенные origins при необходимости
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
-
-	// Middleware
-	r.Use(middleware.Logger)                    // Логирование запросов
-	r.Use(middleware.Recoverer)                 // Восстановление после паник
-	r.Use(middleware.Timeout(60 * time.Second)) // Таймаут запросов
-	r.Use(middleware.RealIP)                    // Получение реального IP
-	r.Use(middleware.RequestID)                 // Добавление ID запроса
-	r.Use(middleware.CleanPath)                 // Очистка пути
-	r.Use(middleware.StripSlashes)              // Удаление слешей в конце
-
-	// Routes
-	r.Route("/v1", func(r chi.Router) {
-		// Добавляем middleware для проверки авторизации
-		r.Use(middleware.AllowContentType("application/json"))
-		r.Use(middleware.SetHeader("Content-Type", "application/json"))
-
-		// Основные эндпоинты
-		r.Post("/chat", handler.Chat)
-		r.Post("/clear-history", handler.ClearHistory)
-
-		// Добавляем health check
-		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
-		})
-	})
+	// Регистрация маршрутов
+	registerRoutes(router, chatHandler, projectAssistant)
 
 	// Настройка и запуск сервера
-	srv := &http.Server{
-		Addr:         ":5641",
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	server := setupServer(router)
 
-	// Graceful shutdown
-	go func() {
-		log.Printf("Server is starting on port %s\n", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
-		}
-	}()
+	// Запуск сервера в горутине
+	go startServer(server)
 
 	// Ожидание сигнала для graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutdown Server ...")
-
-	// Graceful shutdown context
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("Server Shutdown:", err)
-	}
-	log.Println("Server exited properly")
+	waitForShutdown(server)
 }
 
-// Функция ожидания готовности базы данных
 func waitForDatabase(dbURL string) (*sqlx.DB, error) {
 	var db *sqlx.DB
 	var err error
 	maxAttempts := 30
 
 	for i := 0; i < maxAttempts; i++ {
-		log.Printf("Attempting to connect to database (attempt %d/%d)...\n", i+1, maxAttempts)
+		log.Printf("Попытка подключения к базе данных (%d/%d)...", i+1, maxAttempts)
 		db, err = sqlx.Connect("postgres", dbURL)
 		if err == nil {
-			log.Println("Successfully connected to database")
+			log.Println("Успешное подключение к базе данных")
 			return db, nil
 		}
-		log.Printf("Failed to connect: %v. Retrying in 2 seconds...\n", err)
+		log.Printf("Ошибка подключения: %v. Повторная попытка через 2 секунды...", err)
 		time.Sleep(2 * time.Second)
 	}
 
-	return nil, fmt.Errorf("failed to connect to database after %d attempts: %v", maxAttempts, err)
+	return nil, fmt.Errorf("не удалось подключиться к базе данных после %d попыток: %v", maxAttempts, err)
+}
+
+func initializeTables(db *sqlx.DB) error {
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
+            message TEXT NOT NULL,
+            role VARCHAR(50) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+		`CREATE TABLE IF NOT EXISTS project_conversations (
+            id SERIAL PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
+            context JSONB NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`,
+	}
+
+	for _, query := range queries {
+		if _, err := db.Exec(query); err != nil {
+			return fmt.Errorf("ошибка выполнения запроса: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func initializeAuthService() (*grpc.ClientConn, error) {
+	authConfig, err := auth.NewConfig(".auth.env")
+	if err != nil {
+		return nil, fmt.Errorf("ошибка загрузки конфигурации авторизации: %v", err)
+	}
+
+	conn, err := grpc.Dial(authConfig.AuthAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("ошибка подключения к сервису авторизации: %v", err)
+	}
+
+	auth.InitClient(conn)
+	return conn, nil
+}
+
+func setupRouter() *chi.Mux {
+	router := chi.NewRouter()
+
+	// CORS middleware
+	router.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
+	// Основные middleware
+	router.Use(middleware.Logger)
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.Timeout(60 * time.Second))
+	router.Use(middleware.RealIP)
+	router.Use(middleware.RequestID)
+	router.Use(middleware.CleanPath)
+	router.Use(middleware.StripSlashes)
+
+	return router
+}
+
+func registerRoutes(r *chi.Mux, chatHandler *handler.Handler, projectAssistant *projectAI.ProjectAssistantHandler) {
+	r.Route("/v1", func(r chi.Router) {
+		// Middleware для проверки Content-Type
+		r.Use(middleware.AllowContentType("application/json"))
+		r.Use(middleware.SetHeader("Content-Type", "application/json"))
+
+		// Основные эндпоинты чата
+		r.Post("/chat", chatHandler.Chat)
+		r.Post("/clear-history", chatHandler.ClearHistory)
+
+		// Эндпоинты AI-ассистента проектов
+		projectAssistant.RegisterRoutes(r)
+
+		// Health check
+		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		})
+	})
+}
+
+func setupServer(router *chi.Mux) *http.Server {
+	return &http.Server{
+		Addr:         ":5641",
+		Handler:      router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+}
+
+func startServer(srv *http.Server) {
+	log.Printf("Сервер запущен на порту %s\n", srv.Addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Ошибка запуска сервера: %s\n", err)
+	}
+}
+
+func waitForShutdown(srv *http.Server) {
+	// Канал для получения сигналов операционной системы
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Ожидание сигнала
+	<-quit
+	log.Println("Получен сигнал завершения, начинаем graceful shutdown...")
+
+	// Создаем контекст с таймаутом для graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Пытаемся gracefully остановить сервер
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Ошибка при остановке сервера:", err)
+	}
+
+	log.Println("Сервер успешно остановлен")
 }
