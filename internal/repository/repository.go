@@ -1,8 +1,8 @@
 package repository
 
 import (
+	"github.com/Jamolkhon5/mistral/internal/models"
 	"github.com/jmoiron/sqlx"
-	"github.com/your_username/mistral/internal/models"
 )
 
 type Repository struct {
@@ -13,18 +13,9 @@ func NewRepository(db *sqlx.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) SaveMessage(userID string, message, role string) error {
-	query := `
-        INSERT INTO messages (user_id, message, role) 
-        VALUES ($1, $2, $3)`
-
-	_, err := r.db.Exec(query, userID, message, role)
-	return err
-}
-
 func (r *Repository) GetLastMessages(userID string) ([]models.Message, error) {
 	query := `
-        SELECT role, message 
+        SELECT role, message as content  
         FROM messages 
         WHERE user_id = $1 
         ORDER BY created_at DESC 
@@ -32,7 +23,20 @@ func (r *Repository) GetLastMessages(userID string) ([]models.Message, error) {
 
 	var messages []models.Message
 	err := r.db.Select(&messages, query, userID)
-	return messages, err
+	if err != nil {
+		return nil, err
+	}
+
+	return messages, nil
+}
+
+func (r *Repository) SaveMessage(userID string, content, role string) error {
+	query := `
+        INSERT INTO messages (user_id, message, role) 
+        VALUES ($1, $2, $3)`
+
+	_, err := r.db.Exec(query, userID, content, role)
+	return err
 }
 
 func (r *Repository) CountUserTokens(userID string) (int, error) {
@@ -43,5 +47,10 @@ func (r *Repository) CountUserTokens(userID string) (int, error) {
 
 	var totalTokens int
 	err := r.db.Get(&totalTokens, query, userID)
-	return totalTokens / 4, err // примерная оценка токенов
+	return totalTokens / 4, err
+}
+func (r *Repository) ClearUserHistory(userID string) error {
+	query := `DELETE FROM messages WHERE user_id = $1`
+	_, err := r.db.Exec(query, userID)
+	return err
 }

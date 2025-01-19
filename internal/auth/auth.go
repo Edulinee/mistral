@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/your_username/mistral/pkg/proto/auth_v1"
+	"github.com/Jamolkhon5/mistral/pkg/proto/auth_v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/emptypb"

@@ -18,6 +18,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "{{.Name}}"
 
   mistral:
     depends_on:
@@ -34,6 +40,14 @@ services:
       dockerfile: ./docker/Dockerfile
     ports:
       - "${HTTP_PORT}:5641"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "{{.Name}}"
+    tty: true
+    stdin_open: true
 
 networks:
   sinhron:

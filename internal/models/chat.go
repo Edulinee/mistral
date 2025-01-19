@@ -1,8 +1,8 @@
 package models
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string `json:"role" db:"role"`
+	Content string `json:"content" db:"content"`
 }
 
 type ChatRequest struct {
@@ -15,6 +15,8 @@ type ChatResponse struct {
 	Message   string `json:"message" db:"message"`
 	Role      string `json:"role" db:"role"`
 	UpdatedAt string `json:"updatedAt" db:"updated_at"`
+	Response  string `json:"response"`
+	Tokens    int    `json:"tokens"`
 }
 
 type LastMessages struct {
